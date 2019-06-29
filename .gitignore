@@ -1,0 +1,6 @@
+test_dir
+train_dir
+.vscode
+__pycache__
+*.zip
+*.csv
