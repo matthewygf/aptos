@@ -40,7 +40,7 @@ class DataLoader(object):
     self.is_cuda = tf.test.is_built_with_cuda() and tf.test.is_gpu_available()
     self.ckpt_dir = os.path.join(os.getcwd(), "ckpt_dir")
     self.model_dir = os.path.join(os.getcwd(), "model_dir")
-    self.batch_size=8
+    self.batch_size=12
     self.num_batch_per_epoch = (train_size + self.batch_size - 1) // self.batch_size
     self.num_val_batch = (val_size + self.batch_size - 1) // self.batch_size
 
@@ -169,6 +169,7 @@ class FinalClassify(tf.keras.layers.Layer):
     self.bn2 = tf.keras.layers.BatchNormalization(axis=bn_axis)
     self.avg = tf.keras.layers.GlobalAveragePooling2D(data_format=data_format)
     self.dropout = tf.keras.layers.Dropout(0.25)
+    self.fc1 = tf.keras.layers.Dense(2048, activation='relu')
     self.linear = tf.keras.layers.Dense(5, activation=None)
 
   def call(self, inputs, training=True):
@@ -180,6 +181,7 @@ class FinalClassify(tf.keras.layers.Layer):
     x = self.relu(x)
     x = self.avg(x)
     x = self.dropout(x, training=training)
+    x = self.fc1(x)
     x = self.linear(x)
     return x
 
@@ -220,7 +222,15 @@ class Driver(object):
     self.train_acc = tf.cast(self.train_acc, tf.int32)
     self.train_acc = tf.reduce_sum(self.train_acc)
     self.final_var = [var for var in tf.compat.v1.trainable_variables() if var.name.startswith('final')]
-    self.train_op = (tf.compat.v1.train.GradientDescentOptimizer(0.001, use_locking=True)
+    
+    # : LR schedule rate.
+    lr = tf.compat.v1.train.exponential_decay(
+      0.03, tf.maximum((global_step - 50), 0),
+      100, 0.05, staircase=True
+    )
+    lr = tf.maximum(lr, 0.0001)
+    
+    self.train_op = (tf.compat.v1.train.GradientDescentOptimizer(lr, use_locking=True)
             .minimize(self.loss, 
               global_step=global_step, 
               var_list=self.final_var))
@@ -257,19 +267,13 @@ def main():
 
     restore_efficient(sess, loader.ckpt_dir)
 
-    # TODO: LR schedule rate.
-    # lr = tf.compat.v1.train.exponential_decay(
-    #   0.03, tf.maximum((global_step - 50), 0),
-    #   100, 0.05, staircase=True
-    # )
-    # lr = tf.maximum(lr, 0.0001)
     saver = tf.compat.v1.train.Saver(driver.final_var, max_to_keep=1)
 
     sess.run(tf.compat.v1.global_variables_initializer())
 
     # train phrase
     start_time = time.time()
-    for i in range(loader.num_batch_per_epoch * 50):
+    for i in range(loader.num_batch_per_epoch * 100):
       _, acc, loss_val = sess.run([driver.train_op, driver.train_acc, driver.loss])
       if i % 50 == 0:
         ran = float(time.time() - start_time  )/ 60.0
@@ -281,7 +285,7 @@ def main():
         for j in range(loader.num_val_batch):
           val_acc += float(sess.run(driver.val_acc) / loader.batch_size)
         val_acc /= loader.num_val_batch
-        epoch = int(loader.num_batch_per_epoch * i)
+        epoch = int(i // loader.num_batch_per_epoch)
         print("At epoch %d, valid accuracy %.3f" %(epoch, val_acc))
 
         final_dir = os.path.join(loader.ckpt_dir, 'final')
