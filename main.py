@@ -1,5 +1,4 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICE'] = '3'
 import tensorflow as tf
 import numpy as np
 import pandas as pd
@@ -32,6 +31,7 @@ class DataLoader(object):
     self.x_train = self.names[:train_size]
     self.y_train = self.labels[:train_size]
     self.x_val = self.names[train_size:]
+    val_size = self.x_val.shape[0]
     self.y_val = self.labels[train_size:]
     assert self.x_train.shape[0] == self.y_train.shape[0]
     assert self.x_val.shape[0] == self.y_val.shape[0]
@@ -40,8 +40,9 @@ class DataLoader(object):
     self.is_cuda = tf.test.is_built_with_cuda() and tf.test.is_gpu_available()
     self.ckpt_dir = os.path.join(os.getcwd(), "ckpt_dir")
     self.model_dir = os.path.join(os.getcwd(), "model_dir")
-    self.batch_size=4
+    self.batch_size=8
     self.num_batch_per_epoch = (train_size + self.batch_size - 1) // self.batch_size
+    self.num_val_batch = (val_size + self.batch_size - 1) // self.batch_size
 
   def build_datasets(self):
     self._build_train_dataset()
@@ -123,7 +124,7 @@ class DataLoader(object):
       img = Image.fromarray(np.uint8(img.numpy()))
       img.save("test%d.png" % index)
 
-def restore_model(sess, ckpt_dir, enable_ema=True, export_ckpt=None):
+def restore_efficient(sess, ckpt_dir, enable_ema=True, export_ckpt=None):
   sess.run(tf.compat.v1.global_variables_initializer())
   ckpt_dir = os.path.join(ckpt_dir, 'efficient')
   ckpt = tf.compat.v1.train.latest_checkpoint(ckpt_dir)
@@ -135,15 +136,21 @@ def restore_model(sess, ckpt_dir, enable_ema=True, export_ckpt=None):
       if ('moving_mean' in v.name or 
           'moving_variance' in v.name):
         ema_vars.append(v)
-    ema_vars = list(set(ema_vars))
-    var_dict = ema.variables_to_restore(ema_vars)
-    ema_assign_op = ema.apply(ema_vars)
+    ema_vars_new = [var for var in ema_vars if 'efficient' in var.name]
+    ema_vars_new = list(set(ema_vars_new))
+    # NOTE: only restore efficient
+    var_dict = ema.variables_to_restore(ema_vars_new)
+    ema_assign_op = ema.apply(ema_vars_new)
   else:
-    var_dict = None
+    var_dict = [var for var in tf.compat.v1.trainable_variables() if 'efficient' in var.name]
     ema_assign_op = None
 
   sess.run(tf.compat.v1.global_variables_initializer())
-  saver = tf.compat.v1.train.Saver(var_dict, max_to_keep=1)
+  restore_vars = {}
+  for k,v in var_dict.items():
+    if 'efficient' in k:
+      restore_vars[k] = v
+  saver = tf.compat.v1.train.Saver(restore_vars, max_to_keep=1)
   saver.restore(sess, ckpt)
 
   if export_ckpt:
@@ -166,15 +173,65 @@ class FinalClassify(tf.keras.layers.Layer):
 
   def call(self, inputs, training=True):
     x = self.conv1(inputs)
-    x = self.bn1(x)
+    x = self.bn1(x, training=training)
     x = self.relu(x)
     x = self.conv2(x)
-    x = self.bn2(x)
+    x = self.bn2(x, training=training)
     x = self.relu(x)
     x = self.avg(x)
-    x = self.dropout(x)
+    x = self.dropout(x, training=training)
     x = self.linear(x)
     return x
+
+class Driver(object):
+  def __init__(self, model_name, data_format, bn_axis):
+    self.model_name = model_name
+    self.data_format = data_format
+    self.bn_axis = bn_axis
+    self.model_name = model_name
+
+  def build_graph(self, features, training=False, reuse=False):
+    if training:
+      print('------- building training graph --------')
+    else:
+      print('------- building test graph --------')
+
+    logits, _, model = efficientnet_builder.build_model_base(
+      features, self.model_name, reuse=reuse, training=False, data_format=self.data_format)
+    
+    # NOTE: transfer learning
+    model.trainable = False
+
+    with tf.compat.v1.variable_scope("final", reuse=reuse):
+      final_classifier = FinalClassify(self.bn_axis, self.data_format)
+      logits = final_classifier(logits, training=training)
+    
+    return logits, model
+  
+  def build_train_ops(self, global_step, features, labels):
+    self.train_logits, train_m = self.build_graph(features, training=True)
+    self.train_log = tf.compat.v1.nn.sparse_softmax_cross_entropy_with_logits(
+      logits=self.train_logits, labels=labels)
+
+    self.loss = tf.reduce_mean(self.train_log)
+    preds = tf.argmax(self.train_logits, axis=1)
+    
+    self.train_acc = tf.equal(preds, labels)
+    self.train_acc = tf.cast(self.train_acc, tf.int32)
+    self.train_acc = tf.reduce_sum(self.train_acc)
+    self.final_var = [var for var in tf.compat.v1.trainable_variables() if var.name.startswith('final')]
+    self.train_op = (tf.compat.v1.train.GradientDescentOptimizer(0.001, use_locking=True)
+            .minimize(self.loss, 
+              global_step=global_step, 
+              var_list=self.final_var))
+
+  def build_val_ops(self, features, labels):
+    self.val_logits, val_m = self.build_graph(features, training=False, reuse=True)
+    preds = tf.argmax(self.val_logits, axis=1)
+    self.val_acc = tf.equal(preds, labels)
+    self.val_acc = tf.cast(self.val_acc, tf.int32)
+    self.val_acc = tf.reduce_sum(self.val_acc)
+
 
 def main():
   model_name = 'efficientnet-b5' 
@@ -188,31 +245,17 @@ def main():
     data_format = 'channels_first' if loader.is_cuda else 'channels_last'
     bn_axis = 1 if loader.is_cuda else -1
     batch_x, batch_y = loader.train_iterator.get_next()
-    logits, _, model = efficientnet_builder.build_model_base(
-      batch_x, model_name, training=False, data_format=data_format)
-    
-    restore_model(sess, loader.ckpt_dir)
-    
-    # NOTE: transfer learning
-    model.trainable = False
+    val_batch_x, val_batch_y = loader.val_iterator.get_next()
 
     global_step = tf.Variable(
       0, dtype=tf.int32, trainable=False, name="global_step")
 
-    with tf.compat.v1.variable_scope("final"):
-      final_classifier = FinalClassify(bn_axis, data_format)
-      logits = final_classifier(logits)
+    driver = Driver(model_name, data_format, bn_axis)
 
-    log_probs = tf.compat.v1.nn.sparse_softmax_cross_entropy_with_logits(
-      logits=logits, labels=batch_y
-    )
+    driver.build_train_ops(global_step, batch_x, batch_y)
+    driver.build_val_ops(val_batch_x, val_batch_y)
 
-    loss = tf.reduce_mean(log_probs)
-    preds = tf.argmax(logits, axis=1)
-    
-    train_acc = tf.equal(preds, batch_y)
-    train_acc = tf.cast(train_acc, tf.int32)
-    train_acc = tf.reduce_sum(train_acc)
+    restore_efficient(sess, loader.ckpt_dir)
 
     # TODO: LR schedule rate.
     # lr = tf.compat.v1.train.exponential_decay(
@@ -220,26 +263,29 @@ def main():
     #   100, 0.05, staircase=True
     # )
     # lr = tf.maximum(lr, 0.0001)
-    final_var = [var for var in tf.compat.v1.trainable_variables() if var.name.startswith('final')]
-    saver = tf.compat.v1.train.Saver(final_var, max_to_keep=1)
-
-    train_op = (tf.compat.v1.train.GradientDescentOptimizer(0.001, use_locking=True)
-            .minimize(loss, 
-              global_step=global_step, 
-              var_list=final_var))
+    saver = tf.compat.v1.train.Saver(driver.final_var, max_to_keep=1)
 
     sess.run(tf.compat.v1.global_variables_initializer())
 
     # train phrase
     start_time = time.time()
-    for i in range(loader.num_batch_per_epoch * 10):
-      _, acc, loss_val = sess.run([train_op, train_acc, loss])
+    for i in range(loader.num_batch_per_epoch * 50):
+      _, acc, loss_val = sess.run([driver.train_op, driver.train_acc, driver.loss])
       if i % 50 == 0:
-        ran = float(start_time - time.time() )/ 60.0
-        tf.compat.v1.logging.info("Min: %.2f, Step: %d, train_acc: %d, loss_val: %d" % (ran, i, acc, loss_val))
+        ran = float(time.time() - start_time  )/ 60.0
+        acc = float(acc/loader.batch_size)
+        print("Min: %.2f, Step: %d, train_acc: %.3f, loss_val: %.4f" % (ran, i, acc, loss_val))
       
       if i % loader.num_batch_per_epoch == 0:
+        val_acc = 0.0
+        for j in range(loader.num_val_batch):
+          val_acc += float(sess.run(driver.val_acc) / loader.batch_size)
+        val_acc /= loader.num_val_batch
+        epoch = int(loader.num_batch_per_epoch * i)
+        print("At epoch %d, valid accuracy %.3f" %(epoch, val_acc))
+
         final_dir = os.path.join(loader.ckpt_dir, 'final')
+        model_name = os.path.join(final_dir, 'model_classify')
         if not os.path.exists(final_dir):
           os.makedirs(final_dir)
         saver.save(sess, final_dir, global_step=global_step)

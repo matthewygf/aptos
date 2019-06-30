@@ -206,7 +206,7 @@ def build_model(images,
   return logits, model.endpoints
 
 
-def build_model_base(images, model_name, training, override_params=None, data_format='channels_first'):
+def build_model_base(images, model_name, training, reuse=False, override_params=None, data_format='channels_first'):
   """A helper functiion to create a base model and return global_pool.
 
   Args:
@@ -227,7 +227,7 @@ def build_model_base(images, model_name, training, override_params=None, data_fo
   assert isinstance(images, tf.Tensor)
   blocks_args, global_params = get_model_params(model_name, override_params, data_format=data_format)
 
-  with tf.variable_scope(model_name):
+  with tf.variable_scope(model_name, reuse=reuse):
     model = efficientnet_model.Model(blocks_args, global_params)
     features = model(images, training=training, features_only=True)
 
