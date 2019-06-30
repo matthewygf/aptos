@@ -5,3 +5,6 @@ __pycache__
 *.zip
 *.csv
 *.png
+ckpt_dir/**
+*.tar.gz
+efficient-b5/**

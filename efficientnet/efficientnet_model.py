@@ -38,7 +38,7 @@ GlobalParams = collections.namedtuple('GlobalParams', [
 ])
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
 
-# batchnorm = tf.layers.BatchNormalization
+#batchnorm = tf.layers.BatchNormalization
 batchnorm = utils.TpuBatchNormalization  # TPU-specific requirement.
 relu_fn = tf.nn.swish
 
