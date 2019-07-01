@@ -7,32 +7,50 @@ import matplotlib.pyplot as plt
 from efficientnet import efficientnet_builder
 import matplotlib.pyplot as plt
 from utils_ops import Conv2D_Pad
+from sklearn.model_selection import train_test_split
 from PIL import Image
 import time
 
 MEAN_RGB = [0.485, 0.456, 0.406]
 STDDEV_RGB = [0.229, 0.224, 0.225]
 
+FEATURES_ONLY = False
+FINE_TUNE = True
+
 class DataLoader(object):
   def __init__(self, image_size):
     self.path = path = os.path.join(os.getcwd(), "train_dir")
-    df = pd.read_csv('train.csv')
     # id_code,diagnosis
-    self.names = np.asarray(df.id_code, dtype=str)
+    df = pd.read_csv('train.csv')
+    # Balance the distribution in the training set
+    train_ids, val_ids = train_test_split(df.id_code, test_size=0.25)
+    train_df = df[df.id_code.isin(train_ids)]
+    val_df = df[df.id_code.isin(val_ids)]
+    new_train_df = train_df.groupby(['diagnosis']).apply(
+      lambda x: x.sample(450, replace=True)).reset_index(drop=True)
+    
     def pad_dir_name(x):
       filename = x+".png"
       filename = os.path.join(self.path, filename)
       return filename
-    self.names = np.array([pad_dir_name(name) for name in self.names])
-    self.labels = np.asarray(df.diagnosis, dtype=int)
+
+    new_train_df['id_code'] = new_train_df['id_code'].apply(
+      lambda x: pad_dir_name(x))
+    new_train_df = new_train_df.sample(frac=1).reset_index(drop=True)
+    print(new_train_df.tail())
+    print(new_train_df.groupby(['diagnosis']).count())
+    time.sleep(2)
+    val_df['id_code'] = val_df['id_code'].apply(
+      lambda x: pad_dir_name(x))
+
     self.image_size = image_size
     # manual train test split
-    train_size = int(math.ceil(self.names.shape[0] * 0.8))
-    self.x_train = self.names[:train_size]
-    self.y_train = self.labels[:train_size]
-    self.x_val = self.names[train_size:]
+    train_size = new_train_df.shape[0]
+    self.x_train = np.asarray(new_train_df.id_code, dtype=str)
+    self.y_train = np.asarray(new_train_df.diagnosis, dtype=int)
+    self.x_val = np.asarray(val_df.id_code, dtype=str)
     val_size = self.x_val.shape[0]
-    self.y_val = self.labels[train_size:]
+    self.y_val = np.asarray(val_df.diagnosis, dtype=int)
     assert self.x_train.shape[0] == self.y_train.shape[0]
     assert self.x_val.shape[0] == self.y_val.shape[0]
     self.train_dataset = tf.compat.v1.data.Dataset.from_tensor_slices((self.x_train, self.y_train))
@@ -40,7 +58,7 @@ class DataLoader(object):
     self.is_cuda = tf.test.is_built_with_cuda() and tf.test.is_gpu_available()
     self.ckpt_dir = os.path.join(os.getcwd(), "ckpt_dir")
     self.model_dir = os.path.join(os.getcwd(), "model_dir")
-    self.batch_size=12
+    self.batch_size=16
     self.num_batch_per_epoch = (train_size + self.batch_size - 1) // self.batch_size
     self.num_val_batch = (val_size + self.batch_size - 1) // self.batch_size
 
@@ -168,7 +186,7 @@ class FinalClassify(tf.keras.layers.Layer):
     self.conv2 = Conv2D_Pad(128, 1, 1, data_format=data_format)
     self.bn2 = tf.keras.layers.BatchNormalization(axis=bn_axis)
     self.avg = tf.keras.layers.GlobalAveragePooling2D(data_format=data_format)
-    self.dropout = tf.keras.layers.Dropout(0.25)
+    self.dropout = tf.keras.layers.Dropout(0.2)
     self.fc1 = tf.keras.layers.Dense(2048, activation='relu')
     self.linear = tf.keras.layers.Dense(5, activation=None)
 
@@ -198,16 +216,27 @@ class Driver(object):
     else:
       print('------- building test graph --------')
 
-    logits, _, model = efficientnet_builder.build_model_base(
-      features, self.model_name, reuse=reuse, training=False, data_format=self.data_format)
-    
-    # NOTE: transfer learning
-    model.trainable = False
+    logits, endpoints, model = efficientnet_builder.build_model_base(
+      features, self.model_name, 
+      reuse=reuse, training=training, 
+      data_format=self.data_format,
+      feature_only=FEATURES_ONLY)
 
-    with tf.compat.v1.variable_scope("final", reuse=reuse):
-      final_classifier = FinalClassify(self.bn_axis, self.data_format)
-      logits = final_classifier(logits, training=training)
-    
+    if not FINE_TUNE:
+      # NOTE: transfer learning
+      model.trainable = False
+    else:
+      model.trainable = True
+
+    #print(endpoints)
+
+    if FEATURES_ONLY:
+      with tf.compat.v1.variable_scope("final", reuse=reuse):
+        final_classifier = FinalClassify(self.bn_axis, self.data_format)
+        logits = final_classifier(logits, training=training)
+    else:
+      logits = tf.keras.layers.Dense(5)(tf.keras.layers.ReLU()(logits))
+      
     return logits, model
   
   def build_train_ops(self, global_step, features, labels):
@@ -221,8 +250,12 @@ class Driver(object):
     self.train_acc = tf.equal(preds, labels)
     self.train_acc = tf.cast(self.train_acc, tf.int32)
     self.train_acc = tf.reduce_sum(self.train_acc)
-    self.final_var = [var for var in tf.compat.v1.trainable_variables() if var.name.startswith('final')]
-    
+    if FEATURES_ONLY:
+      self.final_var = [var for var in tf.compat.v1.trainable_variables() 
+        if 'final' in var.name]
+    else:
+      self.final_var = tf.compat.v1.trainable_variables()
+
     # : LR schedule rate.
     lr = tf.compat.v1.train.exponential_decay(
       0.03, tf.maximum((global_step - 50), 0),
@@ -244,7 +277,7 @@ class Driver(object):
 
 
 def main():
-  model_name = 'efficientnet-b5' 
+  model_name = 'efficientnet-b3' 
   _, _, image_size, _ = efficientnet_builder.efficientnet_params(model_name)
 
   g = tf.Graph()
@@ -265,7 +298,8 @@ def main():
     driver.build_train_ops(global_step, batch_x, batch_y)
     driver.build_val_ops(val_batch_x, val_batch_y)
 
-    restore_efficient(sess, loader.ckpt_dir)
+    if FEATURES_ONLY:
+      restore_efficient(sess, loader.ckpt_dir)
 
     saver = tf.compat.v1.train.Saver(driver.final_var, max_to_keep=1)
 
@@ -273,7 +307,7 @@ def main():
 
     # train phrase
     start_time = time.time()
-    for i in range(loader.num_batch_per_epoch * 100):
+    for i in range(loader.num_batch_per_epoch * 300):
       _, acc, loss_val = sess.run([driver.train_op, driver.train_acc, driver.loss])
       if i % 50 == 0:
         ran = float(time.time() - start_time  )/ 60.0
@@ -292,7 +326,7 @@ def main():
         model_name = os.path.join(final_dir, 'model_classify')
         if not os.path.exists(final_dir):
           os.makedirs(final_dir)
-        saver.save(sess, final_dir, global_step=global_step)
+        saver.save(sess, model_name, global_step=global_step)
 
     # TODO: set to testphrase keras.
 
