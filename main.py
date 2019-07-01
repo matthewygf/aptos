@@ -109,27 +109,27 @@ class DataLoader(object):
     should_augment = tf.math.log([[80., 20.]])
     aug = tf.random.categorical(should_augment, 1, dtype=tf.int32)
 
+    def transform_further(img):
+      img = tf.image.random_brightness(img, 0.2)
+      cond = tf.random.uniform([], maxval=1, dtype=tf.int32)
+
+      def saturate_hue_contrast(img):
+        img = tf.image.random_saturation(img, lower=0.8, upper=1.2)
+        img = tf.image.random_hue(img, max_delta=0.1)
+        img = tf.image.random_contrast(img, 0.7, 1.3)
+        return img
+
+      return tf.cond(tf.equal(cond, 1),
+          lambda: saturate_hue_contrast(img),
+          lambda: tf.identity(img)
+        )
+
     if is_training:
       log_probs = tf.math.log([[10., 10., 10., 10.]])
       k = tf.random.categorical(log_probs, 1, dtype=tf.int32)
       img = tf.image.random_flip_left_right(img)
       img = tf.image.random_flip_up_down(img)
       img = tf.image.rot90(img, k[0][0])
-      
-      def transform_further(img):
-        img = tf.image.random_brightness(img, 0.2)
-        cond = tf.random.uniform([], maxval=1, dtype=tf.int32)
-
-        def saturate_hue_contrast(img):
-          img = tf.image.random_saturation(img, lower=0.8, upper=1.2)
-          img = tf.image.random_hue(img, max_delta=0.1)
-          img = tf.image.random_contrast(img, 0.7, 1.3)
-          return img
-
-        return tf.cond(tf.equal(cond, 1),
-            lambda: saturate_hue_contrast(img),
-            lambda: tf.identity(img)
-          )
       
     return tf.cond(tf.equal(aug[0][0], 1),
           lambda: transform_further(img),
