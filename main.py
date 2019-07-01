@@ -138,7 +138,7 @@ class DataLoader(object):
   def _parse_func_train(self, names, labels):
     img = self._transform(names, is_training=True)
     if self.is_cuda:
-      img = tf.transpose(img, [0,3,1,2])
+      img = tf.transpose([img], [2,0,1])
       img = tf.reshape(img, [3, self.image_size, self.image_size], name='reshape_img_first')
     else:
       img = tf.reshape(img, [self.image_size, self.image_size, 3], name='reshape_img_last')
@@ -147,7 +147,7 @@ class DataLoader(object):
   def _parse_func_val(self, names, labels):
     img = self._transform(names)
     if self.is_cuda:
-      img = tf.transpose(img, [0,3,1,2])
+      img = tf.transpose([img], [2,0,1])
       img = tf.reshape(img, [3, self.image_size, self.image_size])
     else:
       img = tf.reshape(img, [self.image_size, self.image_size, 3])
