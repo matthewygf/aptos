@@ -106,6 +106,9 @@ class DataLoader(object):
       lambda: tf.identity(crop_and_resize),
       lambda: tf.identity(resize_only)
     )
+    should_augment = tf.math.log([[80., 20.]])
+    aug = tf.random.categorical(should_augment, 1, dtype=tf.int32)
+
     if is_training:
       log_probs = tf.math.log([[10., 10., 10., 10.]])
       k = tf.random.categorical(log_probs, 1, dtype=tf.int32)
@@ -123,18 +126,14 @@ class DataLoader(object):
           img = tf.image.random_contrast(img, 0.7, 1.3)
           return img
 
-        return tf.cond( tf.equal(cond, 1),
+        return tf.cond(tf.equal(cond, 1),
             lambda: saturate_hue_contrast(img),
             lambda: tf.identity(img)
           )
       
-      should_augment = tf.math.log([[80., 20.]])
-      aug = tf.random.categorical(should_augment, 1, dtype=tf.int32)
-      
     return tf.cond(tf.equal(aug[0][0], 1),
           lambda: transform_further(img),
-          lambda: tf.identity(img)
-        )
+          lambda: tf.identity(img))
 
   def _parse_func_train(self, names, labels):
     img = self._transform(names, is_training=True)
