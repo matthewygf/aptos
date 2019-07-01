@@ -99,10 +99,23 @@ class DataLoader(object):
       img = tf.image.random_flip_left_right(img)
       img = tf.image.random_flip_up_down(img)
       img = tf.image.rot90(img, k[0][0])
-      img = tf.image.random_brightness(img, 0.1)
-      img = tf.image.random_saturation(img, lower=0.8, upper=1.2)
-      img = tf.image.random_hue(img, max_delta=0.1)
-      img = tf.image.random_contrast(img, 0.7, 1.3)
+      
+      def transform_further():
+        img = tf.image.random_brightness(img, 0.1)
+        img = tf.image.random_saturation(img, lower=0.8, upper=1.2)
+        img = tf.image.random_hue(img, max_delta=0.1)
+        img = tf.image.random_contrast(img, 0.7, 1.3)
+        return img
+
+      
+      should_augment = tf.math.log([[80., 20.]])
+      aug = tf.random.categorical(should_augment, 1, dtype=tf.int32)
+      img = tf.cond(
+          tf.equal(aug[0][0], 1),
+          lambda: transform_further,
+          lambda: tf.identity(img)
+      )
+      
     return img
 
   def _parse_func_train(self, names, labels):
