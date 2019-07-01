@@ -95,7 +95,9 @@ class DataLoader(object):
     should_crop = tf.math.log([[70., 30.]])
     crop = tf.random.categorical(should_crop, 1, dtype=tf.int32)
     crop_and_resize = tf.image.crop_and_resize(
-      img, [[0.1, 0.1, 0.9, 0.9]], [self.image_size, self.image_size])
+      img, boxes=[[0.1, 0.1, 0.9, 0.9]], 
+      crop_size=[self.image_size, self.image_size],
+      box_ind=[0])
     resize_only = tf.compat.v1.image.resize_image_with_pad(
       img, self.image_size, self.image_size,
       method=tf.image.ResizeMethod.BICUBIC)
